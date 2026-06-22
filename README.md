@@ -95,6 +95,12 @@ campus-login-check.service
 ~/.config/campus-login/env
 ```
 
+这是一个配置文件，不是目录；不要用 `cd` 进入它。查看或修改配置可以用：
+
+```bash
+nano ~/.config/campus-login/env
+```
+
 权限会被设置为：
 
 ```text
