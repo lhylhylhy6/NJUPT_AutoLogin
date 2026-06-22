@@ -168,7 +168,7 @@ systemctl status campus-login-check.service
 实时查看 systemd 日志：
 
 ```bash
-journalctl -u campus-login-check.service -f
+sudo journalctl -u campus-login-check.service -f
 ```
 
 查看简洁日志：
@@ -221,7 +221,7 @@ systemctl list-timers --all campus-login-check.timer
 再看日志：
 
 ```bash
-journalctl -u campus-login-check.service -n 80 --no-pager
+sudo journalctl -u campus-login-check.service -n 80 --no-pager
 ```
 
 如果日志里一直是 `probe returned 204` 或状态文件里是 `LAST_CODE=204`，说明外网探针正常。

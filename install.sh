@@ -249,5 +249,5 @@ systemctl --no-pager --full status "$APP_NAME.timer" | sed -n '1,12p' || true
 info ""
 info "Useful commands:"
 info "  systemctl status $APP_NAME.timer"
-info "  journalctl -u $APP_NAME.service -f"
+info "  sudo journalctl -u $APP_NAME.service -f"
 info "  tail -f $STATE_DIR/check.log"
