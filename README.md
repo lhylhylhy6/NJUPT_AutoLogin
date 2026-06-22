@@ -54,7 +54,7 @@ bash install.sh
 安装脚本会询问这些内容：
 
 - 运行服务的 Linux 用户，默认是当前 sudo 用户。
-- 校园网账号，例如 `学号@cmcc`、`学号@telecom`、`学号@unicom`。
+- 校园网账号，例如 `xxx@cmcc`、`xxx@telecom`、`xxx@unicom`。
 - 校园网密码，输入时不会回显。
 - 登录接口 URL，默认是南邮 eportal。
 - 探针 URL，默认是 Cloudflare 204。
@@ -86,7 +86,7 @@ campus-login-check.service
 示例配置可以参考 [config.example.env](config.example.env)：
 
 ```bash
-CAMPUS_USER_ACCOUNT='your_account@cmcc'
+CAMPUS_USER_ACCOUNT='xxx@cmcc'
 CAMPUS_USER_PASSWORD='your_password'
 CAMPUS_LOGIN_URL='https://p.njupt.edu.cn:802/eportal/portal/login'
 CAMPUS_PROBE_URL='http://cp.cloudflare.com/generate_204'
