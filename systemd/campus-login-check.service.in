@@ -1,0 +1,12 @@
+[Unit]
+Description=Campus network login connectivity check
+Wants=network-online.target
+After=network-online.target NetworkManager.service
+
+[Service]
+Type=oneshot
+User=__USER__
+Group=__GROUP__
+Environment="HOME=__HOME__"
+Environment="CAMPUS_ENV_FILE=__ENV_FILE__"
+ExecStart=/usr/local/sbin/campus-login-check

@@ -1,0 +1,18 @@
+#!/bin/sh
+
+IFACE="$1"
+ACTION="$2"
+WATCH_IFACES="__WATCH_IFACES__"
+
+case " $WATCH_IFACES " in
+    *" $IFACE "*) ;;
+    *) exit 0 ;;
+esac
+
+case "$ACTION" in
+    up|connectivity-change|dhcp4-change|dhcp6-change)
+        /bin/systemctl --no-block start campus-login-check.service >/dev/null 2>&1 || true
+        ;;
+esac
+
+exit 0

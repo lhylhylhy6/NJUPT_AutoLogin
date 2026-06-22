@@ -1,0 +1,147 @@
+#!/usr/bin/env bash
+set -u
+
+ENV_FILE="${CAMPUS_ENV_FILE:-$HOME/.config/campus-login/env}"
+STATE_DIR="${CAMPUS_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/campus-login}"
+STATE_FILE="$STATE_DIR/state"
+LOCK_FILE="$STATE_DIR/check.lock"
+LOG_FILE="${CAMPUS_LOG_FILE:-$STATE_DIR/check.log}"
+
+mkdir -p "$STATE_DIR"
+chmod 700 "$STATE_DIR" 2>/dev/null || true
+
+log() {
+    local message="$*"
+    printf '%s - %s\n' "$(date '+%F %T')" "$message" >> "$LOG_FILE"
+    logger -t campus-login-check -- "$message" 2>/dev/null || true
+}
+
+if [ -r "$ENV_FILE" ]; then
+    # shellcheck source=/dev/null
+    . "$ENV_FILE"
+else
+    log "env file is not readable: $ENV_FILE"
+    exit 1
+fi
+
+CAMPUS_LOGIN_URL="${CAMPUS_LOGIN_URL:-https://p.njupt.edu.cn:802/eportal/portal/login}"
+CAMPUS_PROBE_URL="${CAMPUS_PROBE_URL:-http://cp.cloudflare.com/generate_204}"
+CAMPUS_PROBE_EXPECT="${CAMPUS_PROBE_EXPECT:-204}"
+CAMPUS_FAIL_THRESHOLD="${CAMPUS_FAIL_THRESHOLD:-2}"
+CAMPUS_COOLDOWN_SECONDS="${CAMPUS_COOLDOWN_SECONDS:-60}"
+CAMPUS_AFTER_LOGIN_DELAY="${CAMPUS_AFTER_LOGIN_DELAY:-5}"
+CAMPUS_CONNECT_TIMEOUT="${CAMPUS_CONNECT_TIMEOUT:-2}"
+CAMPUS_MAX_TIME="${CAMPUS_MAX_TIME:-5}"
+
+if [ -z "${CAMPUS_USER_ACCOUNT:-}" ] || [ -z "${CAMPUS_USER_PASSWORD:-}" ]; then
+    log "missing CAMPUS_USER_ACCOUNT or CAMPUS_USER_PASSWORD"
+    exit 1
+fi
+
+exec 9>"$LOCK_FILE"
+if ! flock -n 9; then
+    exit 0
+fi
+
+FAIL_COUNT=0
+LAST_LOGIN=0
+LAST_STATUS="unknown"
+LAST_CODE="000"
+if [ -r "$STATE_FILE" ]; then
+    # shellcheck source=/dev/null
+    . "$STATE_FILE"
+fi
+
+save_state() {
+    local tmp="$STATE_FILE.$$"
+    umask 077
+    {
+        printf 'FAIL_COUNT=%s\n' "${FAIL_COUNT:-0}"
+        printf 'LAST_LOGIN=%s\n' "${LAST_LOGIN:-0}"
+        printf 'LAST_STATUS=%q\n' "${LAST_STATUS:-unknown}"
+        printf 'LAST_CODE=%q\n' "${LAST_CODE:-000}"
+    } > "$tmp"
+    mv "$tmp" "$STATE_FILE"
+}
+
+probe() {
+    local code
+    code="$(curl -sS -o /dev/null -w '%{http_code}' \
+        --connect-timeout "$CAMPUS_CONNECT_TIMEOUT" \
+        --max-time "$CAMPUS_MAX_TIME" \
+        "$CAMPUS_PROBE_URL" 2>/dev/null)" || code="000"
+    printf '%s' "${code:-000}"
+}
+
+login_once() {
+    local account_file password_file code
+    account_file="$(mktemp "$STATE_DIR/account.XXXXXX")" || return 1
+    password_file="$(mktemp "$STATE_DIR/password.XXXXXX")" || {
+        rm -f "$account_file"
+        return 1
+    }
+    chmod 600 "$account_file" "$password_file" 2>/dev/null || true
+    printf '%s' "$CAMPUS_USER_ACCOUNT" > "$account_file"
+    printf '%s' "$CAMPUS_USER_PASSWORD" > "$password_file"
+
+    code="$(curl -sS -o /dev/null -w '%{http_code}' -G \
+        --connect-timeout 5 \
+        --max-time 20 \
+        --data-urlencode "user_password@$password_file" \
+        --data-urlencode "user_account@$account_file" \
+        "$CAMPUS_LOGIN_URL" 2>/dev/null)" || code="000"
+
+    rm -f "$account_file" "$password_file"
+    printf '%s' "${code:-000}"
+}
+
+code="$(probe)"
+if [ "$code" = "$CAMPUS_PROBE_EXPECT" ]; then
+    if [ "${LAST_STATUS:-unknown}" != "ok" ] || [ "${FAIL_COUNT:-0}" -gt 0 ]; then
+        log "connectivity OK via probe ($code)"
+    fi
+    FAIL_COUNT=0
+    LAST_STATUS="ok"
+    LAST_CODE="$code"
+    save_state
+    exit 0
+fi
+
+FAIL_COUNT=$(( ${FAIL_COUNT:-0} + 1 ))
+LAST_STATUS="fail"
+LAST_CODE="$code"
+
+if [ "$FAIL_COUNT" -lt "$CAMPUS_FAIL_THRESHOLD" ]; then
+    log "probe failed with HTTP $code ($FAIL_COUNT/$CAMPUS_FAIL_THRESHOLD)"
+    save_state
+    exit 0
+fi
+
+now="$(date +%s)"
+elapsed=$(( now - ${LAST_LOGIN:-0} ))
+if [ "$elapsed" -lt "$CAMPUS_COOLDOWN_SECONDS" ]; then
+    log "probe still failed with HTTP $code; login cooldown active (${elapsed}s/${CAMPUS_COOLDOWN_SECONDS}s)"
+    save_state
+    exit 0
+fi
+
+LAST_LOGIN="$now"
+save_state
+log "probe failed with HTTP $code ($FAIL_COUNT/$CAMPUS_FAIL_THRESHOLD); trying campus login"
+
+login_code="$(login_once)"
+sleep "$CAMPUS_AFTER_LOGIN_DELAY"
+after_code="$(probe)"
+
+if [ "$after_code" = "$CAMPUS_PROBE_EXPECT" ]; then
+    FAIL_COUNT=0
+    LAST_STATUS="ok"
+    LAST_CODE="$after_code"
+    log "campus login succeeded; probe returned $after_code"
+else
+    LAST_STATUS="fail"
+    LAST_CODE="$after_code"
+    log "campus login attempted (login HTTP $login_code), but probe still returned $after_code"
+fi
+
+save_state

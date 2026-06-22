@@ -1,0 +1,12 @@
+[Unit]
+Description=Run campus network login connectivity check
+
+[Timer]
+OnBootSec=30sec
+OnUnitActiveSec=__INTERVAL__
+AccuracySec=5sec
+Unit=campus-login-check.service
+Persistent=false
+
+[Install]
+WantedBy=timers.target

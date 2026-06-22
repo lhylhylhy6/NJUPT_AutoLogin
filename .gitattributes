@@ -1,0 +1,9 @@
+* text=auto
+
+.gitattributes text eol=lf
+*.sh text eol=lf
+bin/* text eol=lf
+networkmanager/*.in text eol=lf
+systemd/*.in text eol=lf
+*.env text eol=lf
+*.md text eol=lf

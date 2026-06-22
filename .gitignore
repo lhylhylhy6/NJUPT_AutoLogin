@@ -1,0 +1,22 @@
+# Local credentials and generated state.
+.config/
+.local/
+env
+*.env
+!config.example.env
+*.log
+state
+check.lock
+
+# Local packages and temporary files.
+*.zip
+*.tar.gz
+*.tmp
+*.bak
+*.bak.*
+
+# Editor and OS noise.
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
