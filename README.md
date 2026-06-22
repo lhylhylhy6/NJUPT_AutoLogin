@@ -54,7 +54,7 @@ bash install.sh
 安装脚本会询问这些内容：
 
 - 运行服务的 Linux 用户，默认是当前 sudo 用户。
-- 校园网账号，例如 `xxx@cmcc`、`xxx@telecom`、`xxx@unicom`。
+- 校园网账号，例如 `xxx`、`xxx@cmcc`、`xxx@njxy`。
 - 校园网密码，输入时不会回显。
 - 登录接口 URL，默认是南邮 eportal。
 - 探针 URL，默认是 Cloudflare 204。
@@ -68,6 +68,24 @@ bash install.sh
 campus-login-check.timer
 campus-login-check.service
 ```
+
+## 账号后缀
+
+根据现有公开 NJUPT 自动登录脚本和南邮信息化办网络说明，常见账号格式如下：
+
+| 网络/运营商 | 账号格式 |
+| --- | --- |
+| 校园网 / NJUPT | `xxx` |
+| 中国移动 / NJUPT-CMCC | `xxx@cmcc` |
+| 中国电信 / NJUPT-CHINANET | `xxx@njxy` |
+
+联通后缀暂时没有在公开 NJUPT 脚本和学校常见网络说明里找到可靠来源。如果你使用联通，建议先在网页登录一次，然后用浏览器开发者工具查看登录请求里的 `user_account` 实际值。
+
+可参考：
+
+- [Lintkey/njupt_net](https://github.com/Lintkey/njupt_net)
+- [Freedomisgood/NjuptCmcc](https://github.com/Freedomisgood/NjuptCmcc)
+- [南邮信息化建设与管理办公室：校园网常见问题及解决方法](https://xxb.njupt.edu.cn/2025/0428/c5247a282622/page.htm)
 
 ## 配置文件
 

@@ -180,7 +180,7 @@ ENV_FILE="$ENV_DIR/env"
 
 info ""
 info "Campus account configuration"
-CAMPUS_USER_ACCOUNT="$(prompt_required "Campus user account, e.g. xxx@cmcc")"
+CAMPUS_USER_ACCOUNT="$(prompt_required "Campus user account, e.g. xxx, xxx@cmcc, or xxx@njxy")"
 CAMPUS_USER_PASSWORD="$(prompt_secret_twice "Campus password")"
 CAMPUS_LOGIN_URL="$(prompt_default "Campus login URL" "https://p.njupt.edu.cn:802/eportal/portal/login")"
 
