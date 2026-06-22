@@ -114,6 +114,7 @@ CAMPUS_USER_ACCOUNT='xxx@cmcc'
 CAMPUS_USER_PASSWORD='your_password'
 CAMPUS_LOGIN_URL='https://p.njupt.edu.cn:802/eportal/portal/login'
 CAMPUS_PROBE_URL='http://cp.cloudflare.com/generate_204'
+# CAMPUS_PROBE_URLS='http://cp.cloudflare.com/generate_204 http://your-own-probe.example.com/generate_204'
 CAMPUS_PROBE_EXPECT='204'
 CAMPUS_FAIL_THRESHOLD='2'
 CAMPUS_COOLDOWN_SECONDS='60'
@@ -252,6 +253,13 @@ curl -vk --connect-timeout 5 --max-time 10 'https://p.njupt.edu.cn:802/eportal/p
 ip route
 getent hosts cp.cloudflare.com p.njupt.edu.cn
 ping -c 2 223.5.5.5
+```
+
+如果只有 Cloudflare 探针不可达，但其他 204 探针可达，可以在配置文件里添加多个同返回码探针：
+
+```bash
+CAMPUS_PROBE_URLS='http://cp.cloudflare.com/generate_204 http://your-own-probe.example.com/generate_204'
+CAMPUS_PROBE_EXPECT='204'
 ```
 
 ## 自定义到其他校园网

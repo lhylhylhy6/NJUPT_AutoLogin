@@ -28,6 +28,7 @@ fi
 
 CAMPUS_LOGIN_URL="${CAMPUS_LOGIN_URL:-https://p.njupt.edu.cn:802/eportal/portal/login}"
 CAMPUS_PROBE_URL="${CAMPUS_PROBE_URL:-http://cp.cloudflare.com/generate_204}"
+CAMPUS_PROBE_URLS="${CAMPUS_PROBE_URLS:-$CAMPUS_PROBE_URL}"
 CAMPUS_PROBE_EXPECT="${CAMPUS_PROBE_EXPECT:-204}"
 CAMPUS_FAIL_THRESHOLD="${CAMPUS_FAIL_THRESHOLD:-2}"
 CAMPUS_COOLDOWN_SECONDS="${CAMPUS_COOLDOWN_SECONDS:-60}"
@@ -91,18 +92,47 @@ curl_error_note() {
 }
 
 probe() {
-    local code err_file
-    err_file="$(mktemp "$STATE_DIR/probe-error.XXXXXX")" || {
+    local code err_file errors_file error_note last_code probe_url saw_url
+    errors_file="$(mktemp "$STATE_DIR/probe-errors.XXXXXX")" || {
         printf '000'
         return 0
     }
-    code="$(curl -sS -o /dev/null -w '%{http_code}' \
-        --connect-timeout "$CAMPUS_CONNECT_TIMEOUT" \
-        --max-time "$CAMPUS_MAX_TIME" \
-        "$CAMPUS_PROBE_URL" 2>"$err_file")" || code="000"
-    store_curl_error "$err_file" "$PROBE_ERROR_FILE"
-    rm -f "$err_file"
-    printf '%s' "${code:-000}"
+    : > "$errors_file"
+    last_code="000"
+    saw_url=0
+
+    for probe_url in $CAMPUS_PROBE_URLS; do
+        saw_url=1
+        err_file="$(mktemp "$STATE_DIR/probe-error.XXXXXX")" || continue
+        code="$(curl -sS -o /dev/null -w '%{http_code}' \
+            --connect-timeout "$CAMPUS_CONNECT_TIMEOUT" \
+            --max-time "$CAMPUS_MAX_TIME" \
+            "$probe_url" 2>"$err_file")" || code="000"
+        last_code="${code:-000}"
+
+        if [ "$last_code" = "$CAMPUS_PROBE_EXPECT" ]; then
+            : > "$PROBE_ERROR_FILE"
+            rm -f "$err_file" "$errors_file"
+            printf '%s' "$last_code"
+            return 0
+        fi
+
+        error_note="$(tr '\n' ' ' < "$err_file" \
+            | sed -e 's/[[:space:]][[:space:]]*/ /g' -e 's/[[:space:]]$//')"
+        if [ -n "$error_note" ]; then
+            printf '%s -> HTTP %s, curl: %s\n' "$probe_url" "$last_code" "$error_note" >> "$errors_file"
+        else
+            printf '%s -> HTTP %s\n' "$probe_url" "$last_code" >> "$errors_file"
+        fi
+        rm -f "$err_file"
+    done
+
+    if [ "$saw_url" -eq 0 ]; then
+        printf 'no probe URL configured\n' > "$errors_file"
+    fi
+    store_curl_error "$errors_file" "$PROBE_ERROR_FILE"
+    rm -f "$errors_file"
+    printf '%s' "$last_code"
 }
 
 login_once() {
