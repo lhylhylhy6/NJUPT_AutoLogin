@@ -6,6 +6,8 @@ STATE_DIR="${CAMPUS_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/campus-logi
 STATE_FILE="$STATE_DIR/state"
 LOCK_FILE="$STATE_DIR/check.lock"
 LOG_FILE="${CAMPUS_LOG_FILE:-$STATE_DIR/check.log}"
+PROBE_ERROR_FILE="$STATE_DIR/last_probe_error"
+LOGIN_ERROR_FILE="$STATE_DIR/last_login_error"
 
 mkdir -p "$STATE_DIR"
 chmod 700 "$STATE_DIR" 2>/dev/null || true
@@ -64,20 +66,54 @@ save_state() {
     mv "$tmp" "$STATE_FILE"
 }
 
+store_curl_error() {
+    local src="$1"
+    local dst="$2"
+    local tmp="$dst.$$"
+
+    if [ -s "$src" ]; then
+        tr '\n' ' ' < "$src" \
+            | sed -e 's/[[:space:]][[:space:]]*/ /g' -e 's/[[:space:]]$//' > "$tmp"
+    else
+        : > "$tmp"
+    fi
+    chmod 600 "$tmp" 2>/dev/null || true
+    mv "$tmp" "$dst"
+}
+
+curl_error_note() {
+    local file="$1"
+    local message
+    [ -r "$file" ] || return 0
+    message="$(cat "$file")"
+    [ -n "$message" ] || return 0
+    printf '; curl: %s' "$message"
+}
+
 probe() {
-    local code
+    local code err_file
+    err_file="$(mktemp "$STATE_DIR/probe-error.XXXXXX")" || {
+        printf '000'
+        return 0
+    }
     code="$(curl -sS -o /dev/null -w '%{http_code}' \
         --connect-timeout "$CAMPUS_CONNECT_TIMEOUT" \
         --max-time "$CAMPUS_MAX_TIME" \
-        "$CAMPUS_PROBE_URL" 2>/dev/null)" || code="000"
+        "$CAMPUS_PROBE_URL" 2>"$err_file")" || code="000"
+    store_curl_error "$err_file" "$PROBE_ERROR_FILE"
+    rm -f "$err_file"
     printf '%s' "${code:-000}"
 }
 
 login_once() {
-    local account_file password_file code
+    local account_file password_file code err_file
     account_file="$(mktemp "$STATE_DIR/account.XXXXXX")" || return 1
     password_file="$(mktemp "$STATE_DIR/password.XXXXXX")" || {
         rm -f "$account_file"
+        return 1
+    }
+    err_file="$(mktemp "$STATE_DIR/login-error.XXXXXX")" || {
+        rm -f "$account_file" "$password_file"
         return 1
     }
     chmod 600 "$account_file" "$password_file" 2>/dev/null || true
@@ -89,9 +125,10 @@ login_once() {
         --max-time 20 \
         --data-urlencode "user_password@$password_file" \
         --data-urlencode "user_account@$account_file" \
-        "$CAMPUS_LOGIN_URL" 2>/dev/null)" || code="000"
+        "$CAMPUS_LOGIN_URL" 2>"$err_file")" || code="000"
 
-    rm -f "$account_file" "$password_file"
+    store_curl_error "$err_file" "$LOGIN_ERROR_FILE"
+    rm -f "$account_file" "$password_file" "$err_file"
     printf '%s' "${code:-000}"
 }
 
@@ -112,7 +149,7 @@ LAST_STATUS="fail"
 LAST_CODE="$code"
 
 if [ "$FAIL_COUNT" -lt "$CAMPUS_FAIL_THRESHOLD" ]; then
-    log "probe failed with HTTP $code ($FAIL_COUNT/$CAMPUS_FAIL_THRESHOLD)"
+    log "probe failed with HTTP $code ($FAIL_COUNT/$CAMPUS_FAIL_THRESHOLD)$(curl_error_note "$PROBE_ERROR_FILE")"
     save_state
     exit 0
 fi
@@ -120,14 +157,14 @@ fi
 now="$(date +%s)"
 elapsed=$(( now - ${LAST_LOGIN:-0} ))
 if [ "$elapsed" -lt "$CAMPUS_COOLDOWN_SECONDS" ]; then
-    log "probe still failed with HTTP $code; login cooldown active (${elapsed}s/${CAMPUS_COOLDOWN_SECONDS}s)"
+    log "probe still failed with HTTP $code$(curl_error_note "$PROBE_ERROR_FILE"); login cooldown active (${elapsed}s/${CAMPUS_COOLDOWN_SECONDS}s)"
     save_state
     exit 0
 fi
 
 LAST_LOGIN="$now"
 save_state
-log "probe failed with HTTP $code ($FAIL_COUNT/$CAMPUS_FAIL_THRESHOLD); trying campus login"
+log "probe failed with HTTP $code ($FAIL_COUNT/$CAMPUS_FAIL_THRESHOLD)$(curl_error_note "$PROBE_ERROR_FILE"); trying campus login"
 
 login_code="$(login_once)"
 sleep "$CAMPUS_AFTER_LOGIN_DELAY"
@@ -141,7 +178,7 @@ if [ "$after_code" = "$CAMPUS_PROBE_EXPECT" ]; then
 else
     LAST_STATUS="fail"
     LAST_CODE="$after_code"
-    log "campus login attempted (login HTTP $login_code), but probe still returned $after_code"
+    log "campus login attempted (login HTTP $login_code$(curl_error_note "$LOGIN_ERROR_FILE")), but probe still returned $after_code$(curl_error_note "$PROBE_ERROR_FILE")"
 fi
 
 save_state

@@ -234,10 +234,24 @@ sudo journalctl -u campus-login-check.service -n 80 --no-pager
 
 如果一直返回 `302`、`200` 或学校登录页相关内容，通常代表 HTTP 请求被 portal 劫持，脚本会在达到失败阈值后尝试登录。
 
-如果一直是 `000`，通常是 DNS、路由、上游网络或探针地址不可达。可以手动测试：
+如果一直是 `000`，说明 `curl` 没有拿到任何 HTTP 响应，通常不是账号密码错误，而是 DNS、路由、上游网络、登录地址不可达或探针地址不可达。新版脚本会在 `HTTP 000` 后面打印具体的 `curl` 错误。也可以手动测试：
 
 ```bash
 curl -v --max-time 5 http://cp.cloudflare.com/generate_204
+```
+
+再测试登录接口是否能连上：
+
+```bash
+curl -vk --connect-timeout 5 --max-time 10 'https://p.njupt.edu.cn:802/eportal/portal/login'
+```
+
+如果这两个命令都连不上，先检查默认路由和 DNS：
+
+```bash
+ip route
+getent hosts cp.cloudflare.com p.njupt.edu.cn
+ping -c 2 223.5.5.5
 ```
 
 ## 自定义到其他校园网
