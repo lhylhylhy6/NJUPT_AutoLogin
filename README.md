@@ -114,11 +114,12 @@ CAMPUS_USER_ACCOUNT='xxx@cmcc'
 CAMPUS_USER_PASSWORD='your_password'
 CAMPUS_LOGIN_URL='https://p.njupt.edu.cn:802/eportal/portal/login'
 CAMPUS_PROBE_URL='http://cp.cloudflare.com/generate_204'
-# CAMPUS_PROBE_URLS='http://cp.cloudflare.com/generate_204 http://your-own-probe.example.com/generate_204'
 CAMPUS_PROBE_EXPECT='204'
+CAMPUS_CONFIRM_URLS='https://www.baidu.com/favicon.ico https://www.qq.com/favicon.ico'
 CAMPUS_FAIL_THRESHOLD='2'
 CAMPUS_COOLDOWN_SECONDS='60'
-CAMPUS_AFTER_LOGIN_DELAY='5'
+CAMPUS_MAX_COOLDOWN_SECONDS='900'
+CAMPUS_AFTER_LOGIN_DELAY='10'
 CAMPUS_CONNECT_TIMEOUT='2'
 CAMPUS_MAX_TIME='5'
 ```
@@ -136,15 +137,17 @@ systemd timer
         ↓
 每隔 30 秒启动一次检测服务
         ↓
-curl 访问 Cloudflare 204 探针
+curl 访问 Cloudflare 204 主探针
         ↓
 返回 204：认为外网正常
         ↓
-连续失败 2 次：认为校园网认证可能失效
+主探针失败：HTTPS 访问百度、腾讯二次验证
+        ↓
+全部失败且连续 2 次：认为校园网认证可能失效
         ↓
 调用南邮 eportal 登录接口
         ↓
-等待几秒后再次访问探针验证
+等待 10 秒后再次完成三层验证
 ```
 
 登录请求等价于：
@@ -183,6 +186,15 @@ sudo journalctl -u campus-login-check.service -f
 ```bash
 tail -f ~/.local/state/campus-login/check.log
 ```
+
+查看最近一次探测明细和校园网接口的安全摘要：
+
+```bash
+cat ~/.local/state/campus-login/last_probe_result
+cat ~/.local/state/campus-login/last_login_result
+```
+
+后者仅记录接口的 `result`、`code`、`msg` 等白名单字段，不会保存密码或完整响应正文。
 
 手动触发一次检测：
 
@@ -255,12 +267,20 @@ getent hosts cp.cloudflare.com p.njupt.edu.cn
 ping -c 2 223.5.5.5
 ```
 
-如果只有 Cloudflare 探针不可达，但其他 204 探针可达，可以在配置文件里添加多个同返回码探针：
+默认配置中，Cloudflare 主探针异常时会自动用 HTTPS 访问百度和腾讯确认；只要其中一个返回 2xx 或 3xx，就不会触发校园网登录。若某个站点在你的网络里不可达，可以修改确认地址：
+
+```bash
+CAMPUS_CONFIRM_URLS='https://www.baidu.com/favicon.ico https://www.qq.com/favicon.ico'
+```
+
+如需添加自己的 204 主探针，可以使用同返回码的地址：
 
 ```bash
 CAMPUS_PROBE_URLS='http://cp.cloudflare.com/generate_204 http://your-own-probe.example.com/generate_204'
 CAMPUS_PROBE_EXPECT='204'
 ```
+
+认证接口通常无论成功或失败都会返回 `HTTP 200`。新版日志会保存其安全摘要；例如 `result`、`code` 或 `msg` 显示失败时，优先按该业务提示处理。若校园认证平台暂时异常，登录重试会按 60、120、240、480、900 秒退避，避免高频重复请求；网络连通性仍保持每 30 秒检查一次。
 
 ## 自定义到其他校园网
 

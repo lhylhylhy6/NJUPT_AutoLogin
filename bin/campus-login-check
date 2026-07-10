@@ -6,8 +6,8 @@ STATE_DIR="${CAMPUS_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/campus-logi
 STATE_FILE="$STATE_DIR/state"
 LOCK_FILE="$STATE_DIR/check.lock"
 LOG_FILE="${CAMPUS_LOG_FILE:-$STATE_DIR/check.log}"
-PROBE_ERROR_FILE="$STATE_DIR/last_probe_error"
-LOGIN_ERROR_FILE="$STATE_DIR/last_login_error"
+PROBE_RESULT_FILE="$STATE_DIR/last_probe_result"
+LOGIN_RESULT_FILE="$STATE_DIR/last_login_result"
 
 mkdir -p "$STATE_DIR"
 chmod 700 "$STATE_DIR" 2>/dev/null || true
@@ -28,11 +28,14 @@ fi
 
 CAMPUS_LOGIN_URL="${CAMPUS_LOGIN_URL:-https://p.njupt.edu.cn:802/eportal/portal/login}"
 CAMPUS_PROBE_URL="${CAMPUS_PROBE_URL:-http://cp.cloudflare.com/generate_204}"
+# CAMPUS_PROBE_URLS remains a compatible way to add more 204-style primary probes.
 CAMPUS_PROBE_URLS="${CAMPUS_PROBE_URLS:-$CAMPUS_PROBE_URL}"
+CAMPUS_CONFIRM_URLS="${CAMPUS_CONFIRM_URLS:-https://www.baidu.com/favicon.ico https://www.qq.com/favicon.ico}"
 CAMPUS_PROBE_EXPECT="${CAMPUS_PROBE_EXPECT:-204}"
 CAMPUS_FAIL_THRESHOLD="${CAMPUS_FAIL_THRESHOLD:-2}"
 CAMPUS_COOLDOWN_SECONDS="${CAMPUS_COOLDOWN_SECONDS:-60}"
-CAMPUS_AFTER_LOGIN_DELAY="${CAMPUS_AFTER_LOGIN_DELAY:-5}"
+CAMPUS_MAX_COOLDOWN_SECONDS="${CAMPUS_MAX_COOLDOWN_SECONDS:-900}"
+CAMPUS_AFTER_LOGIN_DELAY="${CAMPUS_AFTER_LOGIN_DELAY:-10}"
 CAMPUS_CONNECT_TIMEOUT="${CAMPUS_CONNECT_TIMEOUT:-2}"
 CAMPUS_MAX_TIME="${CAMPUS_MAX_TIME:-5}"
 
@@ -48,6 +51,7 @@ fi
 
 FAIL_COUNT=0
 LAST_LOGIN=0
+LOGIN_FAILURES=0
 LAST_STATUS="unknown"
 LAST_CODE="000"
 if [ -r "$STATE_FILE" ]; then
@@ -61,154 +65,245 @@ save_state() {
     {
         printf 'FAIL_COUNT=%s\n' "${FAIL_COUNT:-0}"
         printf 'LAST_LOGIN=%s\n' "${LAST_LOGIN:-0}"
+        printf 'LOGIN_FAILURES=%s\n' "${LOGIN_FAILURES:-0}"
         printf 'LAST_STATUS=%q\n' "${LAST_STATUS:-unknown}"
         printf 'LAST_CODE=%q\n' "${LAST_CODE:-000}"
     } > "$tmp"
     mv "$tmp" "$STATE_FILE"
 }
 
-store_curl_error() {
-    local src="$1"
-    local dst="$2"
-    local tmp="$dst.$$"
-
-    if [ -s "$src" ]; then
-        tr '\n' ' ' < "$src" \
-            | sed -e 's/[[:space:]][[:space:]]*/ /g' -e 's/[[:space:]]$//' > "$tmp"
-    else
-        : > "$tmp"
-    fi
+write_private_file() {
+    local path="$1"
+    local content="$2"
+    local tmp="$path.$$"
+    umask 077
+    printf '%s\n' "$content" > "$tmp"
     chmod 600 "$tmp" 2>/dev/null || true
-    mv "$tmp" "$dst"
+    mv "$tmp" "$path"
 }
 
-curl_error_note() {
-    local file="$1"
-    local message
-    [ -r "$file" ] || return 0
-    message="$(cat "$file")"
-    [ -n "$message" ] || return 0
-    printf '; curl: %s' "$message"
+normalize_text_file() {
+    tr '\r\n' ' ' < "$1" | sed -e 's/[[:space:]][[:space:]]*/ /g' -e 's/[[:space:]]$//'
 }
 
-probe() {
-    local code err_file errors_file error_note last_code probe_url saw_url
-    errors_file="$(mktemp "$STATE_DIR/probe-errors.XXXXXX")" || {
-        printf '000'
-        return 0
+is_expected_probe_code() {
+    [ "$1" = "$CAMPUS_PROBE_EXPECT" ]
+}
+
+is_success_http_code() {
+    [[ "$1" =~ ^[0-9]{3}$ ]] && (( 10#$1 >= 200 && 10#$1 < 400 ))
+}
+
+REQUEST_CODE="000"
+REQUEST_ERROR=""
+request_url() {
+    local url="$1"
+    local err_file
+    err_file="$(mktemp "$STATE_DIR/curl-error.XXXXXX")" || {
+        REQUEST_CODE="000"
+        REQUEST_ERROR="cannot create curl error file"
+        return
     }
-    : > "$errors_file"
-    last_code="000"
-    saw_url=0
+
+    REQUEST_CODE="$(curl -sS -o /dev/null -w '%{http_code}' \
+        --connect-timeout "$CAMPUS_CONNECT_TIMEOUT" \
+        --max-time "$CAMPUS_MAX_TIME" \
+        "$url" 2>"$err_file")" || REQUEST_CODE="000"
+    REQUEST_CODE="${REQUEST_CODE:-000}"
+    REQUEST_ERROR="$(normalize_text_file "$err_file")"
+    rm -f "$err_file"
+}
+
+append_probe_detail() {
+    local label="$1"
+    local url="$2"
+    local code="$3"
+    local error="$4"
+    local detail="$label $url -> HTTP $code"
+    if [ -n "$error" ]; then
+        detail="$detail; curl: $error"
+    fi
+    if [ -n "${PROBE_DETAILS:-}" ]; then
+        PROBE_DETAILS="$PROBE_DETAILS | $detail"
+    else
+        PROBE_DETAILS="$detail"
+    fi
+}
+
+PROBE_DETAILS=""
+PROBE_PRIMARY_CODE="000"
+PROBE_STATUS="failed"
+probe_connectivity() {
+    local probe_url
+    PROBE_DETAILS=""
+    PROBE_PRIMARY_CODE="000"
+    PROBE_STATUS="failed"
 
     for probe_url in $CAMPUS_PROBE_URLS; do
-        saw_url=1
-        err_file="$(mktemp "$STATE_DIR/probe-error.XXXXXX")" || continue
-        code="$(curl -sS -o /dev/null -w '%{http_code}' \
-            --connect-timeout "$CAMPUS_CONNECT_TIMEOUT" \
-            --max-time "$CAMPUS_MAX_TIME" \
-            "$probe_url" 2>"$err_file")" || code="000"
-        last_code="${code:-000}"
-
-        if [ "$last_code" = "$CAMPUS_PROBE_EXPECT" ]; then
-            : > "$PROBE_ERROR_FILE"
-            rm -f "$err_file" "$errors_file"
-            printf '%s' "$last_code"
+        request_url "$probe_url"
+        PROBE_PRIMARY_CODE="$REQUEST_CODE"
+        append_probe_detail "primary" "$probe_url" "$REQUEST_CODE" "$REQUEST_ERROR"
+        if is_expected_probe_code "$REQUEST_CODE"; then
+            PROBE_STATUS="primary"
+            write_private_file "$PROBE_RESULT_FILE" "$PROBE_DETAILS"
             return 0
         fi
-
-        error_note="$(tr '\n' ' ' < "$err_file" \
-            | sed -e 's/[[:space:]][[:space:]]*/ /g' -e 's/[[:space:]]$//')"
-        if [ -n "$error_note" ]; then
-            printf '%s -> HTTP %s, curl: %s\n' "$probe_url" "$last_code" "$error_note" >> "$errors_file"
-        else
-            printf '%s -> HTTP %s\n' "$probe_url" "$last_code" >> "$errors_file"
-        fi
-        rm -f "$err_file"
     done
 
-    if [ "$saw_url" -eq 0 ]; then
-        printf 'no probe URL configured\n' > "$errors_file"
-    fi
-    store_curl_error "$errors_file" "$PROBE_ERROR_FILE"
-    rm -f "$errors_file"
-    printf '%s' "$last_code"
+    # HTTPS confirmation avoids a false login when only the HTTP 204 endpoint is flaky.
+    for probe_url in $CAMPUS_CONFIRM_URLS; do
+        request_url "$probe_url"
+        append_probe_detail "confirmation" "$probe_url" "$REQUEST_CODE" "$REQUEST_ERROR"
+        if is_success_http_code "$REQUEST_CODE"; then
+            PROBE_STATUS="confirmed"
+            write_private_file "$PROBE_RESULT_FILE" "$PROBE_DETAILS"
+            return 0
+        fi
+    done
+
+    write_private_file "$PROBE_RESULT_FILE" "$PROBE_DETAILS"
+    return 1
 }
 
+extract_response_field() {
+    local response_file="$1"
+    local key="$2"
+    normalize_text_file "$response_file" \
+        | sed -nE "s/.*[\\\"']${key}[\\\"'][[:space:]]*:[[:space:]]*[\\\"']?([^,}\\\"']+).*/\\1/p" \
+        | head -n 1 \
+        | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+        | cut -c1-160
+}
+
+summarize_login_response() {
+    local response_file="$1"
+    local key value summary=""
+    if [ ! -s "$response_file" ]; then
+        printf 'empty response body'
+        return
+    fi
+
+    for key in result code ret_code msg message error; do
+        value="$(extract_response_field "$response_file" "$key")"
+        [ -n "$value" ] || continue
+        if [ -n "$summary" ]; then
+            summary="$summary, "
+        fi
+        summary="$summary$key=$value"
+    done
+
+    if [ -n "$summary" ]; then
+        printf '%s' "$summary"
+    else
+        printf 'unrecognized response body (%s bytes)' "$(wc -c < "$response_file" | tr -d ' ')"
+    fi
+}
+
+LOGIN_CODE="000"
+LOGIN_SUMMARY="not attempted"
 login_once() {
-    local account_file password_file code err_file
+    local account_file password_file response_file err_file
     account_file="$(mktemp "$STATE_DIR/account.XXXXXX")" || return 1
     password_file="$(mktemp "$STATE_DIR/password.XXXXXX")" || {
         rm -f "$account_file"
         return 1
     }
-    err_file="$(mktemp "$STATE_DIR/login-error.XXXXXX")" || {
+    response_file="$(mktemp "$STATE_DIR/login-response.XXXXXX")" || {
         rm -f "$account_file" "$password_file"
         return 1
     }
-    chmod 600 "$account_file" "$password_file" 2>/dev/null || true
+    err_file="$(mktemp "$STATE_DIR/login-error.XXXXXX")" || {
+        rm -f "$account_file" "$password_file" "$response_file"
+        return 1
+    }
+    chmod 600 "$account_file" "$password_file" "$response_file" 2>/dev/null || true
     printf '%s' "$CAMPUS_USER_ACCOUNT" > "$account_file"
     printf '%s' "$CAMPUS_USER_PASSWORD" > "$password_file"
 
-    code="$(curl -sS -o /dev/null -w '%{http_code}' -G \
+    LOGIN_CODE="$(curl -sS -o "$response_file" -w '%{http_code}' -G \
         --connect-timeout 5 \
         --max-time 20 \
         --data-urlencode "user_password@$password_file" \
         --data-urlencode "user_account@$account_file" \
-        "$CAMPUS_LOGIN_URL" 2>"$err_file")" || code="000"
-
-    store_curl_error "$err_file" "$LOGIN_ERROR_FILE"
-    rm -f "$account_file" "$password_file" "$err_file"
-    printf '%s' "${code:-000}"
+        "$CAMPUS_LOGIN_URL" 2>"$err_file")" || LOGIN_CODE="000"
+    LOGIN_CODE="${LOGIN_CODE:-000}"
+    LOGIN_SUMMARY="$(summarize_login_response "$response_file")"
+    if [ -s "$err_file" ]; then
+        LOGIN_SUMMARY="$LOGIN_SUMMARY; curl: $(normalize_text_file "$err_file")"
+    fi
+    write_private_file "$LOGIN_RESULT_FILE" "portal HTTP $LOGIN_CODE; $LOGIN_SUMMARY"
+    rm -f "$account_file" "$password_file" "$response_file" "$err_file"
 }
 
-code="$(probe)"
-if [ "$code" = "$CAMPUS_PROBE_EXPECT" ]; then
-    if [ "${LAST_STATUS:-unknown}" != "ok" ] || [ "${FAIL_COUNT:-0}" -gt 0 ]; then
-        log "connectivity OK via probe ($code)"
+retry_delay() {
+    local delay="$CAMPUS_COOLDOWN_SECONDS"
+    local failures="${LOGIN_FAILURES:-0}"
+    while [ "$failures" -gt 1 ] && [ "$delay" -lt "$CAMPUS_MAX_COOLDOWN_SECONDS" ]; do
+        delay=$(( delay * 2 ))
+        failures=$(( failures - 1 ))
+    done
+    if [ "$delay" -gt "$CAMPUS_MAX_COOLDOWN_SECONDS" ]; then
+        delay="$CAMPUS_MAX_COOLDOWN_SECONDS"
+    fi
+    printf '%s' "$delay"
+}
+
+if probe_connectivity; then
+    if [ "$PROBE_STATUS" = "primary" ]; then
+        if [ "${LAST_STATUS:-unknown}" != "ok" ] || [ "${FAIL_COUNT:-0}" -gt 0 ]; then
+            log "connectivity OK via primary probe (HTTP $PROBE_PRIMARY_CODE)"
+        fi
+        LAST_STATUS="ok"
+    else
+        if [ "${LAST_STATUS:-unknown}" != "confirmed" ]; then
+            log "primary probe unavailable, but HTTPS confirmation succeeded; no login needed: $PROBE_DETAILS"
+        fi
+        LAST_STATUS="confirmed"
     fi
     FAIL_COUNT=0
-    LAST_STATUS="ok"
-    LAST_CODE="$code"
+    LOGIN_FAILURES=0
+    LAST_CODE="$PROBE_PRIMARY_CODE"
     save_state
     exit 0
 fi
 
 FAIL_COUNT=$(( ${FAIL_COUNT:-0} + 1 ))
 LAST_STATUS="fail"
-LAST_CODE="$code"
+LAST_CODE="$PROBE_PRIMARY_CODE"
 
 if [ "$FAIL_COUNT" -lt "$CAMPUS_FAIL_THRESHOLD" ]; then
-    log "probe failed with HTTP $code ($FAIL_COUNT/$CAMPUS_FAIL_THRESHOLD)$(curl_error_note "$PROBE_ERROR_FILE")"
+    log "connectivity validation failed ($FAIL_COUNT/$CAMPUS_FAIL_THRESHOLD): $PROBE_DETAILS"
     save_state
     exit 0
 fi
 
 now="$(date +%s)"
+delay="$(retry_delay)"
 elapsed=$(( now - ${LAST_LOGIN:-0} ))
-if [ "$elapsed" -lt "$CAMPUS_COOLDOWN_SECONDS" ]; then
-    log "probe still failed with HTTP $code$(curl_error_note "$PROBE_ERROR_FILE"); login cooldown active (${elapsed}s/${CAMPUS_COOLDOWN_SECONDS}s)"
+if [ "$elapsed" -lt "$delay" ]; then
     save_state
     exit 0
 fi
 
 LAST_LOGIN="$now"
 save_state
-log "probe failed with HTTP $code ($FAIL_COUNT/$CAMPUS_FAIL_THRESHOLD)$(curl_error_note "$PROBE_ERROR_FILE"); trying campus login"
+log "connectivity validation failed ($FAIL_COUNT/$CAMPUS_FAIL_THRESHOLD); trying campus login: $PROBE_DETAILS"
 
-login_code="$(login_once)"
+login_once
 sleep "$CAMPUS_AFTER_LOGIN_DELAY"
-after_code="$(probe)"
 
-if [ "$after_code" = "$CAMPUS_PROBE_EXPECT" ]; then
+if probe_connectivity; then
     FAIL_COUNT=0
+    LOGIN_FAILURES=0
     LAST_STATUS="ok"
-    LAST_CODE="$after_code"
-    log "campus login succeeded; probe returned $after_code"
+    LAST_CODE="$PROBE_PRIMARY_CODE"
+    log "campus login restored connectivity; portal HTTP $LOGIN_CODE; $LOGIN_SUMMARY"
 else
+    LOGIN_FAILURES=$(( ${LOGIN_FAILURES:-0} + 1 ))
     LAST_STATUS="fail"
-    LAST_CODE="$after_code"
-    log "campus login attempted (login HTTP $login_code$(curl_error_note "$LOGIN_ERROR_FILE")), but probe still returned $after_code$(curl_error_note "$PROBE_ERROR_FILE")"
+    LAST_CODE="$PROBE_PRIMARY_CODE"
+    delay="$(retry_delay)"
+    log "campus login did not restore connectivity; portal HTTP $LOGIN_CODE; $LOGIN_SUMMARY; retry no sooner than ${delay}s; $PROBE_DETAILS"
 fi
 
 save_state
