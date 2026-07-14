@@ -21,6 +21,9 @@ write_config() {
     cat > "$TEST_DIR/env" <<'EOF'
 CAMPUS_USER_ACCOUNT='test@cmcc'
 CAMPUS_USER_PASSWORD='test-password'
+CAMPUS_PORTAL_URL='https://p.njupt.edu.cn/'
+CAMPUS_CONFIG_URL='https://p.njupt.edu.cn:804/eportal/portal/page/loadConfig'
+CAMPUS_LOGIN_URL='https://p.njupt.edu.cn:804/eportal/portal/login'
 CAMPUS_PROBE_URL='http://cp.cloudflare.com/generate_204'
 CAMPUS_CONFIRM_URLS='https://www.baidu.com/favicon.ico https://www.qq.com/favicon.ico'
 CAMPUS_FAIL_THRESHOLD='2'
@@ -65,15 +68,7 @@ case "${MOCK_MODE:-}" in
         esac
         ;;
     portal-failure)
-        case "$url" in
-            https://p.njupt.edu.cn:802/*)
-                printf '{"result":0,"code":"AUTH_FAIL","msg":"invalid credentials"}' > "$output"
-                printf '200'
-                ;;
-            *)
-                exit 7
-                ;;
-        esac
+        exit 7
         ;;
     *)
         exit 9
@@ -82,11 +77,32 @@ esac
 EOF
 chmod +x "$TEST_DIR/bin/curl"
 
+cat > "$TEST_DIR/bin/njupt-portal-login" <<'EOF'
+#!/usr/bin/env python3
+import argparse
+from pathlib import Path
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--response-file", required=True)
+parser.add_argument("--portal-url")
+parser.add_argument("--config-url")
+parser.add_argument("--login-url")
+parser.add_argument("--timeout")
+args = parser.parse_args()
+Path(args.response_file).write_text(
+    '{"result":0,"code":"AUTH_FAIL","msg":"invalid credentials"}',
+    encoding="utf-8",
+)
+print("200")
+EOF
+chmod +x "$TEST_DIR/bin/njupt-portal-login"
+
 run_check() {
     PATH="$TEST_DIR/bin:$PATH" \
     CAMPUS_ENV_FILE="$TEST_DIR/env" \
     CAMPUS_STATE_DIR="$TEST_DIR/state" \
     CAMPUS_LOG_FILE="$TEST_DIR/check.log" \
+    CAMPUS_PORTAL_HELPER="$TEST_DIR/bin/njupt-portal-login" \
     MOCK_CALLS="$TEST_DIR/calls.log" \
     "$CHECK_SCRIPT"
 }

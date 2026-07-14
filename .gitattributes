@@ -7,3 +7,4 @@ networkmanager/*.in text eol=lf
 systemd/*.in text eol=lf
 *.env text eol=lf
 *.md text eol=lf
+*.py text eol=lf

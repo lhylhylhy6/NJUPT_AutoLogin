@@ -6,6 +6,8 @@ INSTALL_BIN="/usr/local/sbin/$APP_NAME"
 SERVICE_FILE="/etc/systemd/system/$APP_NAME.service"
 TIMER_FILE="/etc/systemd/system/$APP_NAME.timer"
 NM_DISPATCHER_FILE="/etc/NetworkManager/dispatcher.d/90-$APP_NAME"
+INSTALL_LIB_DIR="/usr/local/libexec/$APP_NAME"
+INSTALL_HELPER="$INSTALL_LIB_DIR/njupt-portal-login.py"
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 
@@ -102,7 +104,10 @@ write_env_file() {
     {
         printf 'CAMPUS_USER_ACCOUNT=%q\n' "$CAMPUS_USER_ACCOUNT"
         printf 'CAMPUS_USER_PASSWORD=%q\n' "$CAMPUS_USER_PASSWORD"
+        printf 'CAMPUS_PORTAL_URL=%q\n' "$CAMPUS_PORTAL_URL"
+        printf 'CAMPUS_CONFIG_URL=%q\n' "$CAMPUS_CONFIG_URL"
         printf 'CAMPUS_LOGIN_URL=%q\n' "$CAMPUS_LOGIN_URL"
+        printf 'CAMPUS_LOGIN_TIMEOUT=%q\n' "$CAMPUS_LOGIN_TIMEOUT"
         printf 'CAMPUS_PROBE_URL=%q\n' "$CAMPUS_PROBE_URL"
         printf 'CAMPUS_PROBE_EXPECT=%q\n' "$CAMPUS_PROBE_EXPECT"
         printf 'CAMPUS_CONFIRM_URLS=%q\n' "$CAMPUS_CONFIRM_URLS"
@@ -159,8 +164,10 @@ need_cmd install
 need_cmd sed
 need_cmd awk
 need_cmd mktemp
+need_cmd python3
 
 [ -r "$SCRIPT_DIR/bin/campus-login-check" ] || die "missing bin/campus-login-check"
+[ -r "$SCRIPT_DIR/lib/njupt-portal-login.py" ] || die "missing lib/njupt-portal-login.py"
 [ -r "$SCRIPT_DIR/systemd/campus-login-check.service.in" ] || die "missing service template"
 [ -r "$SCRIPT_DIR/systemd/campus-login-check.timer.in" ] || die "missing timer template"
 
@@ -184,7 +191,10 @@ info ""
 info "Campus account configuration"
 CAMPUS_USER_ACCOUNT="$(prompt_required "Campus user account, e.g. xxx, xxx@cmcc, or xxx@njxy")"
 CAMPUS_USER_PASSWORD="$(prompt_secret_twice "Campus password")"
-CAMPUS_LOGIN_URL="$(prompt_default "Campus login URL" "https://p.njupt.edu.cn:802/eportal/portal/login")"
+CAMPUS_PORTAL_URL="$(prompt_default "Campus portal page URL" "https://p.njupt.edu.cn/")"
+CAMPUS_LOGIN_URL="$(prompt_default "Campus login API URL" "https://p.njupt.edu.cn:804/eportal/portal/login")"
+CAMPUS_CONFIG_URL="${CAMPUS_LOGIN_URL%/login}/page/loadConfig"
+CAMPUS_LOGIN_TIMEOUT="20"
 
 info ""
 info "Connectivity check configuration"
@@ -236,6 +246,8 @@ fi
 
 write_env_file "$ENV_FILE" "$TARGET_USER" "$TARGET_GROUP"
 install -o root -g root -m 0755 "$SCRIPT_DIR/bin/campus-login-check" "$INSTALL_BIN"
+install -d -o root -g root -m 0755 "$INSTALL_LIB_DIR"
+install -o root -g root -m 0755 "$SCRIPT_DIR/lib/njupt-portal-login.py" "$INSTALL_HELPER"
 render_template "$SCRIPT_DIR/systemd/campus-login-check.service.in" "$SERVICE_FILE" 0644 root root
 render_template "$SCRIPT_DIR/systemd/campus-login-check.timer.in" "$TIMER_FILE" 0644 root root
 

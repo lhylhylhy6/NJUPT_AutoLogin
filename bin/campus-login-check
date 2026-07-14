@@ -8,6 +8,9 @@ LOCK_FILE="$STATE_DIR/check.lock"
 LOG_FILE="${CAMPUS_LOG_FILE:-$STATE_DIR/check.log}"
 PROBE_RESULT_FILE="$STATE_DIR/last_probe_result"
 LOGIN_RESULT_FILE="$STATE_DIR/last_login_result"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+SOURCE_PORTAL_HELPER="$SCRIPT_DIR/../lib/njupt-portal-login.py"
+INSTALLED_PORTAL_HELPER="/usr/local/libexec/campus-login-check/njupt-portal-login.py"
 
 mkdir -p "$STATE_DIR"
 chmod 700 "$STATE_DIR" 2>/dev/null || true
@@ -26,7 +29,18 @@ else
     exit 1
 fi
 
-CAMPUS_LOGIN_URL="${CAMPUS_LOGIN_URL:-https://p.njupt.edu.cn:802/eportal/portal/login}"
+CAMPUS_PORTAL_URL="${CAMPUS_PORTAL_URL:-https://p.njupt.edu.cn/}"
+CAMPUS_LOGIN_URL="${CAMPUS_LOGIN_URL:-https://p.njupt.edu.cn:804/eportal/portal/login}"
+CAMPUS_CONFIG_URL="${CAMPUS_CONFIG_URL:-https://p.njupt.edu.cn:804/eportal/portal/page/loadConfig}"
+CAMPUS_LOGIN_TIMEOUT="${CAMPUS_LOGIN_TIMEOUT:-20}"
+CAMPUS_PORTAL_HELPER="${CAMPUS_PORTAL_HELPER:-}"
+if [ -z "$CAMPUS_PORTAL_HELPER" ]; then
+    if [ -r "$SOURCE_PORTAL_HELPER" ]; then
+        CAMPUS_PORTAL_HELPER="$SOURCE_PORTAL_HELPER"
+    else
+        CAMPUS_PORTAL_HELPER="$INSTALLED_PORTAL_HELPER"
+    fi
+fi
 CAMPUS_PROBE_URL="${CAMPUS_PROBE_URL:-http://cp.cloudflare.com/generate_204}"
 # CAMPUS_PROBE_URLS remains a compatible way to add more 204-style primary probes.
 CAMPUS_PROBE_URLS="${CAMPUS_PROBE_URLS:-$CAMPUS_PROBE_URL}"
@@ -41,6 +55,10 @@ CAMPUS_MAX_TIME="${CAMPUS_MAX_TIME:-5}"
 
 if [ -z "${CAMPUS_USER_ACCOUNT:-}" ] || [ -z "${CAMPUS_USER_PASSWORD:-}" ]; then
     log "missing CAMPUS_USER_ACCOUNT or CAMPUS_USER_PASSWORD"
+    exit 1
+fi
+if ! command -v python3 >/dev/null 2>&1 || [ ! -r "$CAMPUS_PORTAL_HELPER" ]; then
+    log "NJUPT portal helper or python3 is unavailable"
     exit 1
 fi
 
@@ -202,37 +220,35 @@ summarize_login_response() {
 LOGIN_CODE="000"
 LOGIN_SUMMARY="not attempted"
 login_once() {
-    local account_file password_file response_file err_file
-    account_file="$(mktemp "$STATE_DIR/account.XXXXXX")" || return 1
-    password_file="$(mktemp "$STATE_DIR/password.XXXXXX")" || {
-        rm -f "$account_file"
-        return 1
-    }
+    local response_file err_file
     response_file="$(mktemp "$STATE_DIR/login-response.XXXXXX")" || {
-        rm -f "$account_file" "$password_file"
         return 1
     }
     err_file="$(mktemp "$STATE_DIR/login-error.XXXXXX")" || {
-        rm -f "$account_file" "$password_file" "$response_file"
+        rm -f "$response_file"
         return 1
     }
-    chmod 600 "$account_file" "$password_file" "$response_file" 2>/dev/null || true
-    printf '%s' "$CAMPUS_USER_ACCOUNT" > "$account_file"
-    printf '%s' "$CAMPUS_USER_PASSWORD" > "$password_file"
+    chmod 600 "$response_file" "$err_file" 2>/dev/null || true
 
-    LOGIN_CODE="$(curl -sS -o "$response_file" -w '%{http_code}' -G \
-        --connect-timeout 5 \
-        --max-time 20 \
-        --data-urlencode "user_password@$password_file" \
-        --data-urlencode "user_account@$account_file" \
-        "$CAMPUS_LOGIN_URL" 2>"$err_file")" || LOGIN_CODE="000"
+    LOGIN_CODE="$(
+        CAMPUS_USER_ACCOUNT="$CAMPUS_USER_ACCOUNT" \
+        CAMPUS_USER_PASSWORD="$CAMPUS_USER_PASSWORD" \
+        python3 "$CAMPUS_PORTAL_HELPER" \
+            --portal-url "$CAMPUS_PORTAL_URL" \
+            --config-url "$CAMPUS_CONFIG_URL" \
+            --login-url "$CAMPUS_LOGIN_URL" \
+            --response-file "$response_file" \
+            --timeout "$CAMPUS_LOGIN_TIMEOUT" \
+            2>"$err_file"
+    )" || LOGIN_CODE="000"
     LOGIN_CODE="${LOGIN_CODE:-000}"
+    [[ "$LOGIN_CODE" =~ ^[0-9]{3}$ ]] || LOGIN_CODE="000"
     LOGIN_SUMMARY="$(summarize_login_response "$response_file")"
     if [ -s "$err_file" ]; then
-        LOGIN_SUMMARY="$LOGIN_SUMMARY; curl: $(normalize_text_file "$err_file")"
+        LOGIN_SUMMARY="$LOGIN_SUMMARY; portal client: $(normalize_text_file "$err_file")"
     fi
     write_private_file "$LOGIN_RESULT_FILE" "portal HTTP $LOGIN_CODE; $LOGIN_SUMMARY"
-    rm -f "$account_file" "$password_file" "$response_file" "$err_file"
+    rm -f "$response_file" "$err_file"
 }
 
 retry_delay() {

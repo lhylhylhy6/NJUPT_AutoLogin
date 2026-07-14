@@ -4,10 +4,10 @@
 
 它解决的是这种很烦人的情况：设备还连着 Wi-Fi 或路由器，IP、网关、DNS 都正常，但校园网认证状态过几天失效，外网访问被重定向到登录页，需要重新登录。
 
-本项目默认适配南京邮电大学 eportal 登录接口：
+本项目适配南京邮电大学当前的加密 eportal 登录流程：
 
 ```text
-https://p.njupt.edu.cn:802/eportal/portal/login
+https://p.njupt.edu.cn:804/eportal/portal/login
 ```
 
 默认使用 Cloudflare 的轻量 204 地址做连通性探针：
@@ -22,6 +22,8 @@ http://cp.cloudflare.com/generate_204
 - 每 30 秒进行一次轻量连通性检测，默认可改。
 - 连续失败 2 次才尝试登录，避免偶发网络抖动误触发。
 - 登录请求带 `flock` 互斥锁，避免并发重复登录。
+- 登录前动态获取门户识别出的客户端 IP、页面配置和 `rcn`，不硬编码易失效参数。
+- 按门户当前规则完成账号前缀、Base64 和基于客户端 IP 的参数加密。
 - 登录失败后有冷却时间，避免频繁请求认证服务器。
 - 正常联网时不刷屏写日志，只记录失败、恢复和登录动作。
 - 账号密码保存在用户目录下，自动设置为 `600` 权限。
@@ -34,12 +36,12 @@ http://cp.cloudflare.com/generate_204
 - 宿舍或实验室里长期在线的 Linux 小主机、树莓派、迷你主机。
 - 小主机接在路由器下面，用来维持校园网登录状态。
 - 校园网失效时 Wi-Fi 不会断，只是外网访问失败或被 portal 拦截。
-- 登录接口参数是 `user_account` 和 `user_password`。
+- 使用南邮当前的 `p.njupt.edu.cn` 门户。
 
 不适合：
 
 - 登录需要验证码、短信、动态 Token。
-- 登录接口每次都需要从页面里提取动态参数。
+- 其他学校虽也使用 eportal，但参数生成和加密规则与南邮不一致。
 - 学校认证严格绑定特定设备 MAC，且运行本工具的设备无法完成认证。
 - 你希望检测“网线拔掉/Wi-Fi 掉线”这类链路层断开。这个工具主要解决的是认证失效。
 
@@ -51,12 +53,14 @@ cd NJUPT_AutoLogin
 bash install.sh
 ```
 
+运行环境需要 `systemd`、Bash、curl 和 Python 3；安装脚本会在写入系统文件前检查这些依赖。
+
 安装脚本会询问这些内容：
 
 - 运行服务的 Linux 用户，默认是当前 sudo 用户。
 - 校园网账号，例如 `xxx`、`xxx@cmcc`、`xxx@njxy`。
 - 校园网密码，输入时不会回显。
-- 登录接口 URL，默认是南邮 eportal。
+- 门户页面和登录 API 地址，默认值通常不需要修改。
 - 探针 URL，默认是 Cloudflare 204。
 - 检测间隔，默认 `30s`。
 - 连续失败次数，默认 `2`。
@@ -112,7 +116,10 @@ nano ~/.config/campus-login/env
 ```bash
 CAMPUS_USER_ACCOUNT='xxx@cmcc'
 CAMPUS_USER_PASSWORD='your_password'
-CAMPUS_LOGIN_URL='https://p.njupt.edu.cn:802/eportal/portal/login'
+CAMPUS_PORTAL_URL='https://p.njupt.edu.cn/'
+CAMPUS_CONFIG_URL='https://p.njupt.edu.cn:804/eportal/portal/page/loadConfig'
+CAMPUS_LOGIN_URL='https://p.njupt.edu.cn:804/eportal/portal/login'
+CAMPUS_LOGIN_TIMEOUT='20'
 CAMPUS_PROBE_URL='http://cp.cloudflare.com/generate_204'
 CAMPUS_PROBE_EXPECT='204'
 CAMPUS_CONFIRM_URLS='https://www.baidu.com/favicon.ico https://www.qq.com/favicon.ico'
@@ -145,21 +152,18 @@ curl 访问 Cloudflare 204 主探针
         ↓
 全部失败且连续 2 次：认为校园网认证可能失效
         ↓
-调用南邮 eportal 登录接口
+读取南邮门户首页中的客户端 IP、VLAN 和 MAC
+        ↓
+调用 page/loadConfig 获取登录方式、页面编号和动态 rcn
+        ↓
+按网页当前规则生成并加密登录参数，调用 :804 登录接口
         ↓
 等待 10 秒后再次完成三层验证
 ```
 
-登录请求等价于：
+南邮当前网页不会直接发送账号和密码。它先根据门户配置处理账号前缀和 Base64，再使用门户识别出的客户端 IPv4 生成异或密钥，对登录参数逐项编码。`program_index`、`page_index` 和 `rcn` 来自每次登录前的动态配置请求，不能从一次抓包中长期硬编码。
 
-```bash
-curl -G \
-  --data-urlencode "user_password=你的密码" \
-  --data-urlencode "user_account=你的账号" \
-  "https://p.njupt.edu.cn:802/eportal/portal/login"
-```
-
-脚本内部不会把密码打印到日志里。为了避免密码出现在进程参数中，实际实现会先把账号和密码写入临时文件，再用 `curl --data-urlencode name@file` 读取，结束后删除临时文件。
+这些步骤由 `lib/njupt-portal-login.py` 使用 Python 标准库完成。账号密码通过子进程环境传入，不出现在命令行参数和日志里；完整门户响应也不会写入长期日志，只保留白名单摘要。
 
 ## 常用命令
 
@@ -256,7 +260,7 @@ curl -v --max-time 5 http://cp.cloudflare.com/generate_204
 再测试登录接口是否能连上：
 
 ```bash
-curl -vk --connect-timeout 5 --max-time 10 'https://p.njupt.edu.cn:802/eportal/portal/login'
+curl -v --connect-timeout 5 --max-time 10 'https://p.njupt.edu.cn:804/eportal/portal/page/loadConfig'
 ```
 
 如果这两个命令都连不上，先检查默认路由和 DNS：
@@ -282,18 +286,9 @@ CAMPUS_PROBE_EXPECT='204'
 
 认证接口通常无论成功或失败都会返回 `HTTP 200`。新版日志会保存其安全摘要；例如 `result`、`code` 或 `msg` 显示失败时，优先按该业务提示处理。若校园认证平台暂时异常，登录重试会按 60、120、240、480、900 秒退避，避免高频重复请求；网络连通性仍保持每 30 秒检查一次。
 
-## 自定义到其他校园网
+## 适配其他校园网
 
-如果你的学校也使用类似的 eportal，并且登录参数仍然是：
-
-```text
-user_account
-user_password
-```
-
-通常只需要在安装时修改 `CAMPUS_LOGIN_URL`。
-
-如果参数名或登录流程不同，需要修改 [bin/campus-login-check](bin/campus-login-check) 里的 `login_once()` 函数。
+连通性探针、systemd timer、失败阈值和退避机制可以复用，但 [lib/njupt-portal-login.py](lib/njupt-portal-login.py) 是按南邮当前网页流程实现的。其他学校即使也使用 eportal，通常仍需按其门户脚本重新实现参数生成，不能只替换一个 URL。
 
 ## 安全提醒
 

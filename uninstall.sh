@@ -6,6 +6,7 @@ INSTALL_BIN="/usr/local/sbin/$APP_NAME"
 SERVICE_FILE="/etc/systemd/system/$APP_NAME.service"
 TIMER_FILE="/etc/systemd/system/$APP_NAME.timer"
 NM_DISPATCHER_FILE="/etc/NetworkManager/dispatcher.d/90-$APP_NAME"
+INSTALL_LIB_DIR="/usr/local/libexec/$APP_NAME"
 
 die() {
     echo "Error: $*" >&2
@@ -25,6 +26,8 @@ fi
 systemctl disable --now "$APP_NAME.timer" >/dev/null 2>&1 || true
 systemctl stop "$APP_NAME.service" >/dev/null 2>&1 || true
 rm -f "$SERVICE_FILE" "$TIMER_FILE" "$INSTALL_BIN" "$NM_DISPATCHER_FILE"
+rm -f "$INSTALL_LIB_DIR/njupt-portal-login.py"
+rmdir "$INSTALL_LIB_DIR" 2>/dev/null || true
 systemctl daemon-reload
 
 echo "Removed systemd units, binary, and NetworkManager hook."
