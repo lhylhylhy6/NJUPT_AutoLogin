@@ -27,6 +27,9 @@ else
 fi
 
 CAMPUS_LOGIN_URL="${CAMPUS_LOGIN_URL:-https://p.njupt.edu.cn:802/eportal/portal/login}"
+CAMPUS_CONTEXT_URL="${CAMPUS_CONTEXT_URL:-http://6.6.6.6/?isReback=1}"
+CAMPUS_ACCOUNT_PREFIX="${CAMPUS_ACCOUNT_PREFIX:-,0,}"
+CAMPUS_WLAN_USER_IP="${CAMPUS_WLAN_USER_IP:-}"
 CAMPUS_PROBE_URL="${CAMPUS_PROBE_URL:-http://cp.cloudflare.com/generate_204}"
 # CAMPUS_PROBE_URLS remains a compatible way to add more 204-style primary probes.
 CAMPUS_PROBE_URLS="${CAMPUS_PROBE_URLS:-$CAMPUS_PROBE_URL}"
@@ -199,10 +202,48 @@ summarize_login_response() {
     fi
 }
 
+extract_context_ipv4() {
+    local context_file="$1"
+    local key value
+    for key in wlanuserip wlan_user_ip ss5; do
+        value="$(normalize_text_file "$context_file" \
+            | sed -nE "s/.*${key}[^0-9]*(([0-9]{1,3}\\.){3}[0-9]{1,3}).*/\\1/p" \
+            | head -n 1)"
+        if [[ "$value" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+            printf '%s' "$value"
+            return
+        fi
+    done
+}
+
+discover_wlan_user_ip() {
+    local context_file err_file effective_url discovered_ip=""
+    if [ -n "$CAMPUS_WLAN_USER_IP" ]; then
+        printf '%s' "$CAMPUS_WLAN_USER_IP"
+        return
+    fi
+    [ -n "$CAMPUS_CONTEXT_URL" ] || return
+
+    context_file="$(mktemp "$STATE_DIR/login-context.XXXXXX")" || return
+    err_file="$(mktemp "$STATE_DIR/context-error.XXXXXX")" || {
+        rm -f "$context_file"
+        return
+    }
+    effective_url="$(curl -k -sS -L -o "$context_file" -w '%{url_effective}' \
+        --connect-timeout 3 \
+        --max-time 10 \
+        --max-redirs 5 \
+        "$CAMPUS_CONTEXT_URL" 2>"$err_file")" || effective_url=""
+    printf '\n%s\n' "$effective_url" >> "$context_file"
+    discovered_ip="$(extract_context_ipv4 "$context_file")"
+    rm -f "$context_file" "$err_file"
+    printf '%s' "$discovered_ip"
+}
+
 LOGIN_CODE="000"
 LOGIN_SUMMARY="not attempted"
 login_once() {
-    local account_file password_file response_file err_file
+    local account_file password_file response_file err_file login_account wlan_user_ip request_version
     account_file="$(mktemp "$STATE_DIR/account.XXXXXX")" || return 1
     password_file="$(mktemp "$STATE_DIR/password.XXXXXX")" || {
         rm -f "$account_file"
@@ -217,19 +258,46 @@ login_once() {
         return 1
     }
     chmod 600 "$account_file" "$password_file" "$response_file" 2>/dev/null || true
-    printf '%s' "$CAMPUS_USER_ACCOUNT" > "$account_file"
+    login_account="$CAMPUS_USER_ACCOUNT"
+    if [ -n "$CAMPUS_ACCOUNT_PREFIX" ]; then
+        case "$login_account" in
+            "$CAMPUS_ACCOUNT_PREFIX"*) ;;
+            *) login_account="$CAMPUS_ACCOUNT_PREFIX$login_account" ;;
+        esac
+    fi
+    printf '%s' "$login_account" > "$account_file"
     printf '%s' "$CAMPUS_USER_PASSWORD" > "$password_file"
+
+    wlan_user_ip="$(discover_wlan_user_ip)"
+    request_version="$(date +%s)"
 
     LOGIN_CODE="$(curl -sS -o "$response_file" -w '%{http_code}' -G \
         --connect-timeout 5 \
         --max-time 20 \
-        --data-urlencode "user_password@$password_file" \
+        --user-agent 'Mozilla/5.0 (X11; Linux) AppleWebKit/537.36 Chrome/126 Safari/537.36' \
+        --data-urlencode 'callback=dr1003' \
+        --data-urlencode 'login_method=1' \
         --data-urlencode "user_account@$account_file" \
+        --data-urlencode "user_password@$password_file" \
+        --data-urlencode "wlan_user_ip=$wlan_user_ip" \
+        --data-urlencode 'wlan_user_ipv6=' \
+        --data-urlencode 'wlan_user_mac=000000000000' \
+        --data-urlencode 'wlan_ac_ip=' \
+        --data-urlencode 'wlan_ac_name=' \
+        --data-urlencode 'jsVersion=4.1.3' \
+        --data-urlencode 'terminal_type=1' \
+        --data-urlencode 'lang=zh-cn' \
+        --data-urlencode "v=$request_version" \
         "$CAMPUS_LOGIN_URL" 2>"$err_file")" || LOGIN_CODE="000"
     LOGIN_CODE="${LOGIN_CODE:-000}"
     LOGIN_SUMMARY="$(summarize_login_response "$response_file")"
     if [ -s "$err_file" ]; then
         LOGIN_SUMMARY="$LOGIN_SUMMARY; curl: $(normalize_text_file "$err_file")"
+    fi
+    if [ -n "$wlan_user_ip" ]; then
+        LOGIN_SUMMARY="$LOGIN_SUMMARY; context IP discovered"
+    else
+        LOGIN_SUMMARY="$LOGIN_SUMMARY; context IP inferred by portal"
     fi
     write_private_file "$LOGIN_RESULT_FILE" "portal HTTP $LOGIN_CODE; $LOGIN_SUMMARY"
     rm -f "$account_file" "$password_file" "$response_file" "$err_file"

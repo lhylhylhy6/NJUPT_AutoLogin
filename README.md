@@ -24,6 +24,7 @@ http://cp.cloudflare.com/generate_204
 - 登录请求带 `flock` 互斥锁，避免并发重复登录。
 - 登录失败后有冷却时间，避免频繁请求认证服务器。
 - 正常联网时不刷屏写日志，只记录失败、恢复和登录动作。
+- 自动补齐南邮 eportal 参数，并从重定向页识别校园网侧客户端 IP。
 - 账号密码保存在用户目录下，自动设置为 `600` 权限。
 - 可选安装 NetworkManager dispatcher hook，在网络重连时立即触发一次检测。
 
@@ -34,7 +35,7 @@ http://cp.cloudflare.com/generate_204
 - 宿舍或实验室里长期在线的 Linux 小主机、树莓派、迷你主机。
 - 小主机接在路由器下面，用来维持校园网登录状态。
 - 校园网失效时 Wi-Fi 不会断，只是外网访问失败或被 portal 拦截。
-- 登录接口参数是 `user_account` 和 `user_password`。
+- 使用南邮 eportal 网页认证，账号格式与本项目默认请求兼容。
 
 不适合：
 
@@ -113,6 +114,9 @@ nano ~/.config/campus-login/env
 CAMPUS_USER_ACCOUNT='xxx@cmcc'
 CAMPUS_USER_PASSWORD='your_password'
 CAMPUS_LOGIN_URL='https://p.njupt.edu.cn:802/eportal/portal/login'
+CAMPUS_CONTEXT_URL='http://6.6.6.6/?isReback=1'
+CAMPUS_ACCOUNT_PREFIX=',0,'
+CAMPUS_WLAN_USER_IP=''
 CAMPUS_PROBE_URL='http://cp.cloudflare.com/generate_204'
 CAMPUS_PROBE_EXPECT='204'
 CAMPUS_CONFIRM_URLS='https://www.baidu.com/favicon.ico https://www.qq.com/favicon.ico'
@@ -150,12 +154,24 @@ curl 访问 Cloudflare 204 主探针
 等待 10 秒后再次完成三层验证
 ```
 
+登录前，脚本会访问 `CAMPUS_CONTEXT_URL`，尝试从认证重定向页提取校园网侧客户端 IP。对于接在路由器下的小主机，不会把 `192.168.x.x` 这类路由器 LAN 地址提交给校园网；无法提取时会留空，由 eportal 根据请求来源识别。
+
 登录请求等价于：
 
 ```bash
 curl -G \
+  --data-urlencode 'callback=dr1003' \
+  --data-urlencode 'login_method=1' \
+  --data-urlencode "user_account=,0,你的账号" \
   --data-urlencode "user_password=你的密码" \
-  --data-urlencode "user_account=你的账号" \
+  --data-urlencode "wlan_user_ip=自动识别的校园网侧IP" \
+  --data-urlencode 'wlan_user_ipv6=' \
+  --data-urlencode 'wlan_user_mac=000000000000' \
+  --data-urlencode 'wlan_ac_ip=' \
+  --data-urlencode 'wlan_ac_name=' \
+  --data-urlencode 'jsVersion=4.1.3' \
+  --data-urlencode 'terminal_type=1' \
+  --data-urlencode 'lang=zh-cn' \
   "https://p.njupt.edu.cn:802/eportal/portal/login"
 ```
 
@@ -281,6 +297,8 @@ CAMPUS_PROBE_EXPECT='204'
 ```
 
 认证接口通常无论成功或失败都会返回 `HTTP 200`。新版日志会保存其安全摘要；例如 `result`、`code` 或 `msg` 显示失败时，优先按该业务提示处理。若校园认证平台暂时异常，登录重试会按 60、120、240、480、900 秒退避，避免高频重复请求；网络连通性仍保持每 30 秒检查一次。
+
+如果日志持续出现 `result=0, ret_code=1, msg=认证出现异常！`，先确认运行的是最新版脚本。旧版本只提交账号和密码，缺少 `,0,` 账号前缀、登录方式和客户端上下文，会被当前 eportal 拒绝。
 
 ## 自定义到其他校园网
 

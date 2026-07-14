@@ -39,6 +39,16 @@ set -u
 
 output='/dev/null'
 url=''
+for argument in "$@"; do
+    case "$argument" in
+        user_account@*)
+            printf 'ACCOUNT=%s\n' "$(cat "${argument#user_account@}")" >> "$MOCK_CALLS"
+            ;;
+        wlan_user_ip=*)
+            printf 'WLAN_USER_IP=%s\n' "${argument#wlan_user_ip=}" >> "$MOCK_CALLS"
+            ;;
+    esac
+done
 while [ "$#" -gt 0 ]; do
     case "$1" in
         -o)
@@ -66,6 +76,10 @@ case "${MOCK_MODE:-}" in
         ;;
     portal-failure)
         case "$url" in
+            http://6.6.6.6/*)
+                printf '<script>var ss5="10.23.45.67";</script>' > "$output"
+                printf '200'
+                ;;
             https://p.njupt.edu.cn:802/*)
                 printf '{"result":0,"code":"AUTH_FAIL","msg":"invalid credentials"}' > "$output"
                 printf '200'
@@ -105,5 +119,7 @@ MOCK_MODE='portal-failure' run_check
 MOCK_MODE='portal-failure' run_check
 assert_contains 'LOGIN_FAILURES=1' "$TEST_DIR/state/state"
 assert_contains 'portal HTTP 200; result=0, code=AUTH_FAIL, msg=invalid credentials' "$TEST_DIR/state/last_login_result"
+assert_contains 'ACCOUNT=,0,test@cmcc' "$TEST_DIR/calls.log"
+assert_contains 'WLAN_USER_IP=10.23.45.67' "$TEST_DIR/calls.log"
 
 printf 'PASS: campus-login-check tests\n'
